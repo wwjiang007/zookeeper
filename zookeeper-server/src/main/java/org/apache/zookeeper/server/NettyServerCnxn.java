@@ -22,6 +22,7 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.Writer;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
@@ -40,6 +41,7 @@ import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import org.apache.jute.BinaryInputArchive;
 import org.apache.jute.Record;
+import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.proto.ReplyHeader;
@@ -74,6 +76,8 @@ public class NettyServerCnxn extends ServerCnxn {
         if (this.factory.login != null) {
             this.zooKeeperSaslServer = new ZooKeeperSaslServer(factory.login);
         }
+        InetAddress addr = ((InetSocketAddress) channel.remoteAddress()).getAddress();
+        addAuthInfo(new Id("ip", addr.getHostAddress()));
     }
 
     @Override
@@ -124,6 +128,7 @@ public class NettyServerCnxn extends ServerCnxn {
                 }
             });
         } else {
+            ServerMetrics.getMetrics().CONNECTION_DROP_COUNT.add(1);
             channel.eventLoop().execute(this::releaseQueuedBuffer);
         }
     }
@@ -531,7 +536,7 @@ public class NettyServerCnxn extends ServerCnxn {
             close();
         } catch(ClientCnxnLimitException e) {
             // Common case exception, print at debug level
-            ServerMetrics.CONNECTION_REJECTED.add(1);
+            ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Closing connection to " + getRemoteSocketAddress(), e);
             }

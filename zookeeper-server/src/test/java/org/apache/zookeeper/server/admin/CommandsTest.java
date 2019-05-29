@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import org.apache.zookeeper.metrics.MetricsUtils;
 
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ServerMetrics;
@@ -169,6 +170,13 @@ public class CommandsTest extends ClientBase {
     }
 
     @Test
+    public void testLastSnapshot() throws IOException, InterruptedException {
+        testCommand("last_snapshot",
+                    new Field("zxid", String.class),
+                    new Field("timestamp", Long.class));
+    }
+
+    @Test
     public void testMonitor() throws IOException, InterruptedException {
         ArrayList<Field> fields = new ArrayList<>(Arrays.asList(
                 new Field("version", String.class),
@@ -193,8 +201,10 @@ public class CommandsTest extends ClientBase {
                 new Field("global_sessions", Long.class),
                 new Field("local_sessions", Long.class),
                 new Field("connection_drop_probability", Double.class)
-        ));
-        for (String metric : ServerMetrics.getAllValues().keySet()) {
+        ));        
+        Map<String, Object> metrics = MetricsUtils.currentServerMetrics();
+        
+        for (String metric : metrics.keySet()) {
             if (metric.startsWith("avg_")) {
                 fields.add(new Field(metric, Double.class));  
             } else {

@@ -16,14 +16,18 @@
  * limitations under the License.
  */
 
-package org.apache.zookeeper.jmx;
+package org.apache.zookeeper.server.persistence;
 
 /**
- * A bunch of constants.
- * TODO: will get rid of it eventually.
+ * stores the zxid (as in its file name) and the last modified timestamp
+ * of a snapshot file
  */
-public class CommonNames {
-    public static final String DOMAIN="org.apache.ZooKeeperService";
-    public static final String DATA_TREE_KEY="DataTree";
-    public static final String STANDALONE_SERVER_KEY="StandaloneServer";
+public class SnapshotInfo {
+    public long zxid;
+    public long timestamp;
+
+    SnapshotInfo(long zxid, long timestamp) {
+        this.zxid = zxid;
+        this.timestamp = timestamp;
+    }
 }

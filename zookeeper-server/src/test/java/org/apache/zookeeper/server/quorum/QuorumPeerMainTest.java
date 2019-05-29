@@ -20,7 +20,7 @@ package org.apache.zookeeper.server.quorum;
 
 import static org.apache.zookeeper.test.ClientBase.CONNECTION_TIMEOUT;
 import static org.apache.zookeeper.test.ClientBase.createEmptyTestDir;
-import static org.mockito.Matchers.any;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -871,7 +871,7 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
 
         // make sure it has a chance to write it to disk
         int sleepTime = 0;
-        Long longLeader = new Long(leader);
+        Long longLeader = Long.valueOf(leader);
         while (!p.qvAcksetPairs.get(0).getAckset().contains(longLeader)) {
             if (sleepTime > 2000) {
                 Assert.fail("Transaction not synced to disk within 1 second " + p.qvAcksetPairs.get(0).getAckset()

@@ -310,7 +310,7 @@ public class NIOServerCnxnFactory extends ServerCnxnFactory {
                 acceptErrorLogger.flush();
             } catch (IOException e) {
                 // accept, maxClientCnxns, configureBlocking
-                ServerMetrics.CONNECTION_REJECTED.add(1);
+                ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
                 acceptErrorLogger.rateLimitLog(
                     "Error accepting new connection: " + e.getMessage());
                 fastCloseSock(sc);
@@ -576,6 +576,7 @@ public class NIOServerCnxnFactory extends ServerCnxnFactory {
                         continue;
                     }
                     for (NIOServerCnxn conn : cnxnExpiryQueue.poll()) {
+                        ServerMetrics.getMetrics().SESSIONLESS_CONNECTIONS_EXPIRED.add(1);
                         conn.close();
                     }
                 }

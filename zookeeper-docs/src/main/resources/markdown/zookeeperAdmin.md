@@ -612,7 +612,7 @@ property, when available, is noted below.
     transaction log file in blocks of preAllocSize kilobytes. The
     default block size is 64M. One reason for changing the size of
     the blocks is to reduce the block size if snapshots are taken
-    more often. (Also, see **snapCount**).
+    more often. (Also, see **snapCount** and **snapSizeLimitInKb**).
 
 * *snapCount* :
     (Java system property: **zookeeper.snapCount**)
@@ -626,6 +626,21 @@ property, when available, is noted below.
     reaches a runtime generated random value in the \[snapCount/2+1, snapCount]
     range.The default snapCount is 100,000.
 
+* *snapSizeLimitInKb* :
+    (Java system property: **zookeeper.snapSizeLimitInKb**)
+    ZooKeeper records its transactions using snapshots and
+    a transaction log (think write-ahead log). The total size in bytes allowed
+    in the set of transactions recorded in the transaction log before a snapshot
+    can be taken (and the transaction log rolled) is determined
+    by snapSize. In order to prevent all of the machines in the quorum
+    from taking a snapshot at the same time, each ZooKeeper server
+    will take a snapshot when the size in bytes of the set of transactions in the
+    transaction log reaches a runtime generated random value in the \[snapSize/2+1, snapSize]
+    range. Each file system has a minimum standard file size and in order
+    to for valid functioning of this feature, the number chosen must be larger
+    than that value. The default snapSizeLimitInKb is 4,194,304 (4GB).
+    A non-positive value will disable the feature.
+
 * *txnLogSizeLimitInKb* :
     (Java system property: **zookeeper.txnLogSizeLimitInKb**)
     Zookeeper transaction log file can also be controlled more
@@ -633,14 +648,14 @@ property, when available, is noted below.
     slower follower syncs when sync is done using transaction log.
     This is because leader has to scan through the appropriate log
     file on disk to find the transaction to start sync from.
-    This feature is turned off by this default and snapCount is the
-    only value that limits transaction log size. When enabled
-    Zookeeper will roll the log when either of the limit is hit.
+    This feature is turned off by default and snapCount and snapSizeLimitInKb are the
+    only values that limit transaction log size. When enabled
+    Zookeeper will roll the log when any of the limits is hit.
     Please note that actual log size can exceed this value by the size
     of the serialized transaction. On the other hand, if this value is
     set too close to (or smaller than) **preAllocSize**,
-    it can cause Zookeeper to roll the log for every tranasaction. While
-    this is not a correctness issue, this may cause severly degraded
+    it can cause Zookeeper to roll the log for every transaction. While
+    this is not a correctness issue, this may cause severely degraded
     performance. To avoid this and to get most out of this feature, it is
     recommended to set the value to N * **preAllocSize**
     where N >= 2.
@@ -774,7 +789,7 @@ property, when available, is noted below.
     dropping.
     This parameter defines the interval in milliseconds when the dropping
     probability is adjusted. When set to -1, probabilistic dropping is disabled.
-    Default is -1.     
+    Default is -1.
 
 * *connectionDropIncrease* :
     (Java system property: **zookeeper.connection_throttle_drop_increase**)
@@ -821,6 +836,26 @@ property, when available, is noted below.
     Specifies ServerCnxnFactory implementation. 
     This should be set to `NettyServerCnxnFactory` in order to use TLS based server communication.
     Default is `NIOServerCnxnFactory`.
+
+* *flushDelay* :
+    (Java system property: **zookeeper.flushDelay**)
+    Time in milliseconds to delay the flush of the commit log.
+    Does not effect the limit defined by *maxBatchSize*.
+    Disabled by default (with value 0). Ensembles with high write rates
+    may see throughput improved with a value of 10-20 ms.
+
+* *maxWriteQueuePollTime* :
+    (Java system property: **zookeeper.maxWriteQueuePollTime**)
+    If *flushDelay* is enabled, this determines the amount of time in milliseconds
+    to wait before flushing when no new requests are being queued.
+    Set to *flushDelay*/3 by default (implicitly disabled by default).
+
+* *maxBatchSize* :
+    (Java system property: **zookeeper.maxBatchSize**)
+    The number of transactions allowed in the server before a flush of the
+    commit log is triggered.
+    Does not effect the limit defined by *flushDelay*.
+    Default is 1000.
 
 <a name="sc_clusterOptions"></a>
 
@@ -908,6 +943,13 @@ of servers -- that is, when deploying clusters of servers.
     ###### Note
     >Default value is 5 seconds.
 
+* *quorumCnxnTimeoutMs* :
+    (Java system property: zookeeper.**quorumCnxnTimeoutMs**)
+    Sets the read timeout value for the connections for leader election notifications.
+    Only applicable if you are using electionAlg 3.
+    ######Note
+    >Default value is -1, which will then use the syncLimit * tickTime as the timeout.
+
 * *standaloneEnabled* :
     (No Java system property)
     **New in 3.5.0:**
@@ -982,6 +1024,20 @@ As an example, this will enable all four letter word commands:
     properly, check your operating system's options regarding TCP
     keepalive for more information.  Defaults to
     **false**.
+
+* *observer.reconnectDelayMs* :
+    (Java system property: **zookeeper.observer.reconnectDelayMs**)
+    When observer loses its connection with the leader, it waits for the
+    specified value before trying to reconnect with the leader so that
+    the entire observer fleet won't try to run leader election and reconnect
+    to the leader at once.
+    Defaults to 0 ms.
+
+* *observer.election.DelayMs* :
+    (Java system property: **zookeeper.observer.election.DelayMs**)
+    Delay the observer's participation in a leader election upon disconnect
+    so as to prevent unexpected additional load on the voting peers during
+    the process. Defaults to 200 ms.
 
 <a name="sc_authOptions"></a>
 
@@ -1759,8 +1815,8 @@ that represents the update is written to non-volatile storage. A new
 log file is started when the number of transactions written to the
 current log file reaches a (variable) threshold. The threshold is
 computed using the same parameter which influences the frequency of
-snapshotting (see snapCount above). The log file's suffix is the first
-zxid written to that log.
+snapshotting (see snapCount and snapSizeLimitInKb above). The log file's
+suffix is the first zxid written to that log.
 
 <a name="sc_filemanagement"></a>
 
@@ -1800,63 +1856,7 @@ individual settings in which it is being deployed.
 <a name="Recovery+-+TxnLogToolkit"></a>
 
 #### Recovery - TxnLogToolkit
-
-TxnLogToolkit is a command line tool shipped with ZooKeeper which
-is capable of recovering transaction log entries with broken CRC.
-
-Running it without any command line parameters or with the `-h,--help` argument, it outputs the following help page:
-
-    $ bin/zkTxnLogToolkit.sh
-    usage: TxnLogToolkit [-dhrv] txn_log_file_name
-    -d,--dump      Dump mode. Dump all entries of the log file. (this is the default)
-    -h,--help      Print help message
-    -r,--recover   Recovery mode. Re-calculate CRC for broken entries.
-    -v,--verbose   Be verbose in recovery mode: print all entries, not just fixed ones.
-    -y,--yes       Non-interactive mode: repair all CRC errors without asking
-
-The default behaviour is safe: it dumps the entries of the given
-transaction log file to the screen: (same as using `-d,--dump` parameter)
-
-    $ bin/zkTxnLogToolkit.sh log.100000001
-    ZooKeeper Transactional Log File with dbid 0 txnlog format version 2
-    4/5/18 2:15:58 PM CEST session 0x16295bafcc40000 cxid 0x0 zxid 0x100000001 createSession 30000
-    CRC ERROR - 4/5/18 2:16:05 PM CEST session 0x16295bafcc40000 cxid 0x1 zxid 0x100000002 closeSession null
-    4/5/18 2:16:05 PM CEST session 0x16295bafcc40000 cxid 0x1 zxid 0x100000002 closeSession null
-    4/5/18 2:16:12 PM CEST session 0x26295bafcc90000 cxid 0x0 zxid 0x100000003 createSession 30000
-    4/5/18 2:17:34 PM CEST session 0x26295bafcc90000 cxid 0x0 zxid 0x200000001 closeSession null
-    4/5/18 2:17:34 PM CEST session 0x16295bd23720000 cxid 0x0 zxid 0x200000002 createSession 30000
-    4/5/18 2:18:02 PM CEST session 0x16295bd23720000 cxid 0x2 zxid 0x200000003 create '/andor,#626262,v{s{31,s{'world,'anyone}}},F,1
-    EOF reached after 6 txns.
-
-There's a CRC error in the 2nd entry of the above transaction log file. In **dump**
-mode, the toolkit only prints this information to the screen without touching the original file. In
-**recovery** mode (`-r,--recover` flag) the original file still remains
-untouched and all transactions will be copied over to a new txn log file with ".fixed" suffix. It recalculates
-CRC values and copies the calculated value, if it doesn't match the original txn entry.
-By default, the tool works interactively: it asks for confirmation whenever CRC error encountered.
-
-    $ bin/zkTxnLogToolkit.sh -r log.100000001
-    ZooKeeper Transactional Log File with dbid 0 txnlog format version 2
-    CRC ERROR - 4/5/18 2:16:05 PM CEST session 0x16295bafcc40000 cxid 0x1 zxid 0x100000002 closeSession null
-    Would you like to fix it (Yes/No/Abort) ?
-
-Answering **Yes** means the newly calculated CRC value will be outputted
-to the new file. **No** means that the original CRC value will be copied over.
-**Abort** will abort the entire operation and exits.
-(In this case the ".fixed" will not be deleted and left in a half-complete state: contains only entries which
-have already been processed or only the header if the operation was aborted at the first entry.)
-
-    $ bin/zkTxnLogToolkit.sh -r log.100000001
-    ZooKeeper Transactional Log File with dbid 0 txnlog format version 2
-    CRC ERROR - 4/5/18 2:16:05 PM CEST session 0x16295bafcc40000 cxid 0x1 zxid 0x100000002 closeSession null
-    Would you like to fix it (Yes/No/Abort) ? y
-    EOF reached after 6 txns.
-    Recovery file log.100000001.fixed has been written with 1 fixed CRC error(s)
-
-The default behaviour of recovery is to be silent: only entries with CRC error get printed to the screen.
-One can turn on verbose mode with the `-v,--verbose` parameter to see all records.
-Interactive mode can be turned off with the `-y,--yes` parameter. In this case all CRC errors will be fixed
-in the new transaction file.
+More details can be found in [this](http://zookeeper.apache.org/doc/current/zookeeperTools.html#zkTxnLogToolkit)
 
 <a name="sc_commonProblems"></a>
 

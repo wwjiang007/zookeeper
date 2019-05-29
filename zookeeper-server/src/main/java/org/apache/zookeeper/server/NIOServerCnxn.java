@@ -155,6 +155,7 @@ public class NIOServerCnxn extends ServerCnxn {
         if (incomingBuffer.remaining() != 0) { // have we read length bytes?
             int rc = sock.read(incomingBuffer); // sock is non-blocking, so ok
             if (rc < 0) {
+                ServerMetrics.getMetrics().CONNECTION_DROP_COUNT.add(1);
                 throw new EndOfStreamException(
                         "Unable to read additional data from client sessionid 0x"
                         + Long.toHexString(sessionId)
@@ -314,6 +315,7 @@ public class NIOServerCnxn extends ServerCnxn {
             if (k.isReadable()) {
                 int rc = sock.read(incomingBuffer);
                 if (rc < 0) {
+                    ServerMetrics.getMetrics().CONNECTION_DROP_COUNT.add(1);
                     throw new EndOfStreamException(
                             "Unable to read additional data from client sessionid 0x"
                             + Long.toHexString(sessionId)
@@ -362,7 +364,7 @@ public class NIOServerCnxn extends ServerCnxn {
             close();
         } catch (ClientCnxnLimitException e) {
             // Common case exception, print at debug level
-            ServerMetrics.CONNECTION_REJECTED.add(1);
+            ServerMetrics.getMetrics().CONNECTION_REJECTED.add(1);
             if (LOG.isDebugEnabled()) {
                 LOG.debug("Exception causing close of session 0x"
                           + Long.toHexString(sessionId) + ": " + e.getMessage());

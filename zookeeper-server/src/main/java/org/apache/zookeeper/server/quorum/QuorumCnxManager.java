@@ -804,7 +804,7 @@ public class QuorumCnxManager {
     private void setSockOpts(Socket sock) throws SocketException {
         sock.setTcpNoDelay(true);
         sock.setKeepAlive(tcpKeepAlive);
-        sock.setSoTimeout(self.tickTime * self.syncLimit);
+        sock.setSoTimeout(this.socketTimeout);
     }
 
     /**
@@ -1192,10 +1192,9 @@ public class QuorumCnxManager {
                     /**
                      * Allocates a new ByteBuffer to receive the message
                      */
-                    byte[] msgArray = new byte[length];
+                    final byte[] msgArray = new byte[length];
                     din.readFully(msgArray, 0, length);
-                    ByteBuffer message = ByteBuffer.wrap(msgArray);
-                    addToRecvQueue(new Message(message.duplicate(), sid));
+                    addToRecvQueue(new Message(ByteBuffer.wrap(msgArray), sid));
                 }
             } catch (Exception e) {
                 LOG.warn("Connection broken for id " + sid + ", my id = "
