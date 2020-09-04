@@ -64,6 +64,7 @@
     <module>zookeeper-client</module>
     <module>zookeeper-recipes</module>
     <module>zookeeper-assembly</module>
+    <module>zookeeper-compatibility-tests</module>
   </modules>
 
   <scm>
@@ -78,7 +79,7 @@
   </issueManagement>
   <ciManagement>
     <system>jenkins</system>
-    <url>https://builds.apache.org/view/Z/view/ZooKeeper/</url>
+    <url>https://ci-hadoop.apache.org/view/ZooKeeper/</url>
   </ciManagement>
   <mailingLists>
     <mailingList>
@@ -428,12 +429,13 @@
     <slf4j.version>1.7.25</slf4j.version>
     <audience-annotations.version>0.5.0</audience-annotations.version>
     <jmockit.version>1.48</jmockit.version>
-    <junit.version>4.12</junit.version>
+    <junit.version>5.6.2</junit.version>
+    <junit-platform.version>1.6.2</junit-platform.version>
     <log4j.version>1.2.17</log4j.version>
     <mockito.version>2.27.0</mockito.version>
     <hamcrest.version>1.3</hamcrest.version>
     <commons-cli.version>1.2</commons-cli.version>
-    <netty.version>4.1.48.Final</netty.version>
+    <netty.version>4.1.50.Final</netty.version>
     <jetty.version>9.4.24.v20191120</jetty.version>
     <jackson.version>2.10.3</jackson.version>
     <json.version>1.1.1</json.version>
@@ -554,8 +556,30 @@
         <version>${jmockit.version}</version>
       </dependency>
       <dependency>
-        <groupId>junit</groupId>
-        <artifactId>junit</artifactId>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-api</artifactId>
+        <version>${junit.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-engine</artifactId>
+        <version>${junit.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter-params</artifactId>
+        <version>${junit.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.platform</groupId>
+        <artifactId>junit-platform-runner</artifactId>
+        <version>${junit-platform.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.junit.vintage</groupId>
+        <artifactId>junit-vintage-engine</artifactId>
         <version>${junit.version}</version>
       </dependency>
       <dependency>

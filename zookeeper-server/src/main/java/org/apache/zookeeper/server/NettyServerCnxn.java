@@ -115,6 +115,9 @@ public class NettyServerCnxn extends ServerCnxn {
         // if this is not in cnxns then it's already closed
         if (!factory.cnxns.remove(this)) {
             LOG.debug("cnxns size:{}", factory.cnxns.size());
+            if (channel.isOpen()) {
+                channel.close();
+            }
             return;
         }
 
@@ -168,7 +171,8 @@ public class NettyServerCnxn extends ServerCnxn {
         WatcherEvent e = event.getWrapper();
 
         try {
-            sendResponse(h, e, "notification");
+            int responseSize = sendResponse(h, e, "notification");
+            ServerMetrics.getMetrics().WATCH_BYTES.add(responseSize);
         } catch (IOException e1) {
             LOG.debug("Problem sending to {}", getRemoteSocketAddress(), e1);
             close();
@@ -176,15 +180,19 @@ public class NettyServerCnxn extends ServerCnxn {
     }
 
     @Override
-    public void sendResponse(ReplyHeader h, Record r, String tag,
+    public int sendResponse(ReplyHeader h, Record r, String tag,
                              String cacheKey, Stat stat, int opCode) throws IOException {
         // cacheKey and stat are used in caching, which is not
         // implemented here. Implementation example can be found in NIOServerCnxn.
         if (closingChannel || !channel.isOpen()) {
-            return;
+            return 0;
         }
-        sendBuffer(serialize(h, r, tag, cacheKey, stat, opCode));
+        ByteBuffer[] bb = serialize(h, r, tag, cacheKey, stat, opCode);
+        int responseSize = bb[0].getInt();
+        bb[0].rewind();
+        sendBuffer(bb);
         decrOutstandingAndCheckThrottle(h);
+        return responseSize;
     }
 
     @Override
