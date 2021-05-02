@@ -903,11 +903,26 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
                         "waiting for server to start");
             }
 
-            assertTrue(svrs.mt[0].getQuorumPeer().getPeerState() == QuorumPeer.ServerState.LOOKING);
-            assertTrue(svrs.mt[highestServerIndex].getQuorumPeer().getPeerState()
-                                      == QuorumPeer.ServerState.LEADING);
+            // Expecting that only 3 node will be leader is wrong, even 2 node can be leader, when cluster is formed with 1 node
+            boolean firstAndSecondNodeFormedCluster = false;
+            if (QuorumPeer.ServerState.LEADING == svrs.mt[1].getQuorumPeer().getPeerState()) {
+                assertEquals(QuorumPeer.ServerState.FOLLOWING,
+                    svrs.mt[0].getQuorumPeer().getPeerState());
+                assertEquals(QuorumPeer.ServerState.FOLLOWING,
+                    svrs.mt[highestServerIndex].getQuorumPeer().getPeerState());
+                firstAndSecondNodeFormedCluster = true;
+            } else {
+                // Verify leader out of view scenario
+                assertEquals(QuorumPeer.ServerState.LOOKING,
+                    svrs.mt[0].getQuorumPeer().getPeerState());
+                assertEquals(QuorumPeer.ServerState.LEADING,
+                    svrs.mt[highestServerIndex].getQuorumPeer().getPeerState());
+            }
             for (int i = 1; i < highestServerIndex; i++) {
-                assertTrue(svrs.mt[i].getQuorumPeer().getPeerState() == QuorumPeer.ServerState.FOLLOWING);
+                assertTrue(
+                    svrs.mt[i].getQuorumPeer().getPeerState() == QuorumPeer.ServerState.FOLLOWING
+                        || svrs.mt[i].getQuorumPeer().getPeerState()
+                        == QuorumPeer.ServerState.LEADING);
             }
 
             // Look through the logs for output that indicates Node 1 is LEADING or FOLLOWING
@@ -920,13 +935,18 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
                 foundLeading = leading.matcher(line).matches();
                 foundFollowing = following.matcher(line).matches();
             }
+            if (firstAndSecondNodeFormedCluster) {
+                assertTrue(foundFollowing,
+                    "Corrupt peer should join quorum with servers having same server configuration");
+            } else {
+                assertFalse(foundLeading, "Corrupt peer should never become leader");
+                assertFalse(foundFollowing,
+                    "Corrupt peer should not attempt connection to out of view leader");
+            }
 
         } finally {
             qlogger.removeAppender(appender);
         }
-
-        assertFalse(foundLeading, "Corrupt peer should never become leader");
-        assertFalse(foundFollowing, "Corrupt peer should not attempt connection to out of view leader");
     }
 
     @Test
@@ -1615,11 +1635,139 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
         }
     }
 
+    /**
+     * If learner failed to do SNAP sync with leader before it's writing
+     * the snapshot to disk, it's possible that it might have DIFF sync
+     * with new leader or itself being elected as a leader.
+     *
+     * This test is trying to guarantee there is no data inconsistency for
+     * this case.
+     */
+    @Test
+    public void testDiffSyncAfterSnap() throws Exception {
+        final int ENSEMBLE_SERVERS = 3;
+        MainThread[] mt = new MainThread[ENSEMBLE_SERVERS];
+        ZooKeeper[] zk = new ZooKeeper[ENSEMBLE_SERVERS];
+
+        try {
+            // 1. start a quorum
+            final int[] clientPorts = new int[ENSEMBLE_SERVERS];
+            StringBuilder sb = new StringBuilder();
+            String server;
+
+            for (int i = 0; i < ENSEMBLE_SERVERS; i++) {
+                clientPorts[i] = PortAssignment.unique();
+                server = "server." + i + "=127.0.0.1:" + PortAssignment.unique()
+                         + ":" + PortAssignment.unique()
+                         + ":participant;127.0.0.1:" + clientPorts[i];
+                sb.append(server + "\n");
+            }
+            String currentQuorumCfgSection = sb.toString();
+
+            // start servers
+            Context[] contexts = new Context[ENSEMBLE_SERVERS];
+            for (int i = 0; i < ENSEMBLE_SERVERS; i++) {
+                final Context context = new Context();
+                contexts[i] = context;
+                mt[i] = new MainThread(i, clientPorts[i], currentQuorumCfgSection, false) {
+                    @Override
+                    public TestQPMain getTestQPMain() {
+                        return new CustomizedQPMain(context);
+                    }
+                };
+                mt[i].start();
+                zk[i] = new ZooKeeper("127.0.0.1:" + clientPorts[i], ClientBase.CONNECTION_TIMEOUT, this);
+            }
+            waitForAll(zk, States.CONNECTED);
+            LOG.info("all servers started");
+
+            final String nodePath = "/testDiffSyncAfterSnap";
+
+            // 2. find leader and a follower
+            int leaderId = -1;
+            int followerA = -1;
+            for (int i = ENSEMBLE_SERVERS - 1; i >= 0; i--) {
+                if (mt[i].main.quorumPeer.leader != null) {
+                    leaderId = i;
+                } else if (followerA == -1) {
+                    followerA = i;
+                }
+            }
+
+            // 3. stop follower A
+            LOG.info("shutdown follower {}", followerA);
+            mt[followerA].shutdown();
+            waitForOne(zk[followerA], States.CONNECTING);
+
+            // 4. issue some traffic
+            int index = 0;
+            int numOfRequests = 10;
+            for (int i = 0; i < numOfRequests; i++) {
+                zk[leaderId].create(nodePath + index++,
+                   new byte[1], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            }
+
+            CustomQuorumPeer leaderQuorumPeer = (CustomQuorumPeer) mt[leaderId].main.quorumPeer;
+
+            // 5. inject fault to cause the follower exit when received NEWLEADER
+            contexts[followerA].newLeaderReceivedCallback = new NewLeaderReceivedCallback() {
+                boolean processed = false;
+                @Override
+                public void process() throws IOException {
+                    if (processed) {
+                        return;
+                    }
+                    processed = true;
+                    System.setProperty(LearnerHandler.FORCE_SNAP_SYNC, "false");
+                    throw new IOException("read timedout");
+                }
+            };
+
+            // 6. force snap sync once
+            LOG.info("force snapshot sync");
+            System.setProperty(LearnerHandler.FORCE_SNAP_SYNC, "true");
+
+            // 7. start follower A
+            mt[followerA].start();
+            waitForOne(zk[followerA], States.CONNECTED);
+            LOG.info("verify the nodes are exist in memory");
+            for (int i = 0; i < index; i++) {
+                assertNotNull(zk[followerA].exists(nodePath + i, false));
+            }
+
+            // 8. issue another request which will be persisted on disk
+            zk[leaderId].create(nodePath + index++,
+               new byte[1], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+
+            // wait some time to let this get written to disk
+            Thread.sleep(500);
+
+            // 9. reload data from disk and make sure it's still consistent
+            LOG.info("restarting follower {}", followerA);
+            mt[followerA].shutdown();
+            waitForOne(zk[followerA], States.CONNECTING);
+            mt[followerA].start();
+            waitForOne(zk[followerA], States.CONNECTED);
+
+            for (int i = 0; i < index; i++) {
+                assertNotNull(zk[followerA].exists(nodePath + i, false), "node " + i + " should exist");
+            }
+
+        } finally {
+            System.clearProperty(LearnerHandler.FORCE_SNAP_SYNC);
+            for (int i = 0; i < ENSEMBLE_SERVERS; i++) {
+                mt[i].shutdown();
+                zk[i].close();
+            }
+        }
+    }
+
     static class Context {
 
         boolean quitFollowing = false;
         boolean exitWhenAckNewLeader = false;
         NewLeaderAckCallback newLeaderAckCallback = null;
+        NewLeaderReceivedCallback newLeaderReceivedCallback = null;
 
     }
 
@@ -1627,6 +1775,10 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
 
         void start();
 
+    }
+
+    interface NewLeaderReceivedCallback {
+        void process() throws IOException;
     }
 
     interface StartForwardingListener {
@@ -1701,6 +1853,14 @@ public class QuorumPeerMainTest extends QuorumPeerTestBase {
                         }
                     }
                     super.writePacket(pp, flush);
+                }
+
+                @Override
+                void readPacket(QuorumPacket qp) throws IOException {
+                    super.readPacket(qp);
+                    if (qp.getType() == Leader.NEWLEADER && context.newLeaderReceivedCallback != null) {
+                        context.newLeaderReceivedCallback.process();
+                    }
                 }
             };
         }

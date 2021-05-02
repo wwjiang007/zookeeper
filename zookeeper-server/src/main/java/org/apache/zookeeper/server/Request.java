@@ -18,6 +18,7 @@
 
 package org.apache.zookeeper.server;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import java.nio.ByteBuffer;
 import java.util.List;
 import org.apache.jute.Record;
@@ -271,6 +272,7 @@ public class Request {
         case OpCode.checkWatches:
         case OpCode.removeWatches:
         case OpCode.addWatch:
+        case OpCode.whoAmI:
             return true;
         default:
             return false;
@@ -287,6 +289,7 @@ public class Request {
         case OpCode.getData:
         case OpCode.getEphemerals:
         case OpCode.multiRead:
+        case OpCode.whoAmI:
             return false;
         case OpCode.create:
         case OpCode.create2:
@@ -373,6 +376,8 @@ public class Request {
                 return "closeSession";
             case OpCode.error:
                 return "error";
+            case OpCode.whoAmI:
+                return "whoAmI";
             default:
                 return "unknown " + op;
         }
@@ -404,7 +409,7 @@ public class Request {
                 if (pathLen >= 0 && pathLen < 4096 && rbuf.remaining() >= pathLen) {
                     byte[] b = new byte[pathLen];
                     rbuf.get(b);
-                    path = new String(b);
+                    path = new String(b, UTF_8);
                 }
             } catch (Exception e) {
                 // ignore - can't find the path, will output "n/a" instead
@@ -458,30 +463,20 @@ public class Request {
     }
 
     /**
-     * Returns comma separated list of users authenticated in the current
-     * session
+     * Returns a formatted, comma-separated list of the user IDs
+     * associated with this {@code Request}, or {@code null} if no
+     * user IDs were found.
+     *
+     * The return value is used for audit logging.  While it may be
+     * easy on the eyes, it is underspecified: it does not mention the
+     * corresponding {@code scheme}, nor are its components escaped.
+     * This is not a security feature.
+     *
+     * @return a comma-separated list of user IDs, or {@code null} if
+     * no user IDs were found.
      */
-    public String getUsers() {
-        if (authInfo == null) {
-            return (String) null;
-        }
-        if (authInfo.size() == 1) {
-            return AuthUtil.getUser(authInfo.get(0));
-        }
-        StringBuilder users = new StringBuilder();
-        boolean first = true;
-        for (Id id : authInfo) {
-            String user = AuthUtil.getUser(id);
-            if (user != null) {
-                if (first) {
-                    first = false;
-                } else {
-                    users.append(",");
-                }
-                users.append(user);
-            }
-        }
-        return users.toString();
+    public String getUsersForAudit() {
+        return AuthUtil.getUsers(authInfo);
     }
 
     public TxnDigest getTxnDigest() {
