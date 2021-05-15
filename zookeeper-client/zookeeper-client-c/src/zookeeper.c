@@ -279,7 +279,7 @@ static void queue_completion_nolock(completion_head_t *list, completion_list_t *
         int add_to_front);
 static void queue_completion(completion_head_t *list, completion_list_t *c,
         int add_to_front);
-static int handle_socket_error_msg(zhandle_t *zh, int line, int rc,
+static int handle_socket_error_msg(zhandle_t *zh, int line, const char *func, int rc,
     const char* format,...);
 static void cleanup_bufs(zhandle_t *zh,int callCompletion,int rc);
 
@@ -333,6 +333,18 @@ static void zookeeper_set_sock_timeout(zhandle_t *, socket_t, int);
 static socket_t zookeeper_connect(zhandle_t *, struct sockaddr_storage *, socket_t);
 
 /*
+ * return 1 if zh has a SASL client configured, 0 otherwise.
+ */
+static int has_sasl_client(zhandle_t* zh)
+{
+#ifdef HAVE_CYRUS_SASL_H
+    return zh->sasl_client != NULL;
+#else /* !HAVE_CYRUS_SASL_H */
+    return 0;
+#endif /* HAVE_CYRUS_SASL_H */
+}
+
+/*
  * return 1 if zh has a SASL client performing authentication, 0 otherwise.
  */
 static int is_sasl_auth_in_progress(zhandle_t* zh)
@@ -342,6 +354,38 @@ static int is_sasl_auth_in_progress(zhandle_t* zh)
 #else /* !HAVE_CYRUS_SASL_H */
     return 0;
 #endif /* HAVE_CYRUS_SASL_H */
+}
+
+/*
+ * Extract the type field (ZOO_*_OP) of a serialized RequestHeader.
+ *
+ * (This is not the most efficient way of fetching 4 bytes, but it is
+ * currently only used during SASL negotiation.)
+ *
+ * \param buffer the buffer to extract the request type from.  Must
+ *   start with a serialized RequestHeader;
+ * \param len the buffer length.  Must be positive.
+ * \param out_type out parameter; pointer to the location where the
+ *   extracted type is to be stored.  Cannot be NULL.
+ * \return ZOK on success, or < 0 if something went wrong
+ */
+static int extract_request_type(char *buffer, int len, int32_t *out_type)
+{
+    struct iarchive *ia;
+    struct RequestHeader h;
+    int rc;
+
+    ia = create_buffer_iarchive(buffer, len);
+    rc = ia ? ZOK : ZSYSTEMERROR;
+    rc = rc < 0 ? rc : deserialize_RequestHeader(ia, "header", &h);
+    deallocate_RequestHeader(&h);
+    if (ia) {
+        close_buffer_iarchive(&ia);
+    }
+
+    *out_type = h.type;
+
+    return rc;
 }
 
 #ifndef THREADED
@@ -662,6 +706,7 @@ static void destroy(zhandle_t *zh)
 #ifdef HAVE_CYRUS_SASL_H
     if (zh->sasl_client) {
         zoo_sasl_client_destroy(zh->sasl_client);
+        free(zh->sasl_client);
         zh->sasl_client = NULL;
     }
 #endif /* HAVE_CYRUS_SASL_H */
@@ -1821,7 +1866,24 @@ static int recv_buffer(zhandle_t *zh, buffer_list_t *buff)
         /* dirty hack to make new client work against old server
          * old server sends 40 bytes to finish connection handshake,
          * while we're expecting 41 (1 byte for read-only mode data) */
-        if (buff == &zh->primer_buffer && rc == buff->len - 1) ++rc;
+        if (rc > 0 && buff == &zh->primer_buffer) {
+            /* primer_buffer's curr_offset starts at 4 (see prime_connection) */
+            int avail = buff->curr_offset - sizeof(buff->len) + rc;
+
+            /* exactly 40 bytes (out of 41 expected) collected? */
+            if (avail == buff->len - 1) {
+                int32_t reply_len;
+
+                /* extract length of ConnectResponse (+ 1-byte flag?) */
+                memcpy(&reply_len, buff->buffer, sizeof(reply_len));
+                reply_len = ntohl(reply_len);
+
+                /* if 1-byte flag was not sent, fake it (value 0) */
+                if ((int)(reply_len + sizeof(reply_len)) == buff->len - 1) {
+                    ++rc;
+                }
+            }
+        }
 
         switch(rc) {
         case 0:
@@ -1894,23 +1956,23 @@ void free_completions(zhandle_t *zh,int callCompletion,int reason)
             }
         }
     }
-    if (zoo_lock_auth(zh) == 0) {
-        a_list.completion = NULL;
-        a_list.next = NULL;
 
-        get_auth_completions(&zh->auth_h, &a_list);
-        zoo_unlock_auth(zh);
+    zoo_lock_auth(zh);
+    a_list.completion = NULL;
+    a_list.next = NULL;
+    get_auth_completions(&zh->auth_h, &a_list);
+    zoo_unlock_auth(zh);
 
-        a_tmp = &a_list;
-        // chain call user's completion function
-        while (a_tmp->completion != NULL) {
-            auth_completion = a_tmp->completion;
-            auth_completion(reason, a_tmp->auth_data);
-            a_tmp = a_tmp->next;
-            if (a_tmp == NULL)
-                break;
-        }
+    a_tmp = &a_list;
+    // chain call user's completion function
+    while (a_tmp->completion != NULL) {
+        auth_completion = a_tmp->completion;
+        auth_completion(reason, a_tmp->auth_data);
+        a_tmp = a_tmp->next;
+        if (a_tmp == NULL)
+            break;
     }
+
     free_auth_completion(&a_list);
 }
 
@@ -1967,7 +2029,7 @@ static void handle_error(zhandle_t *zh,int rc)
     addrvec_next(&zh->addrs, &zh->addr_cur);
 }
 
-static int handle_socket_error_msg(zhandle_t *zh, int line, int rc,
+static int handle_socket_error_msg(zhandle_t *zh, int line, const char *func, int rc,
         const char* format, ...)
 {
     if(logLevel>=ZOO_LOG_LEVEL_ERROR){
@@ -1975,7 +2037,7 @@ static int handle_socket_error_msg(zhandle_t *zh, int line, int rc,
         char buf[1024];
         va_start(va,format);
         vsnprintf(buf, sizeof(buf)-1,format,va);
-        log_message(LOGCALLBACK(zh), ZOO_LOG_LEVEL_ERROR,line,__func__,
+        log_message(LOGCALLBACK(zh), ZOO_LOG_LEVEL_ERROR, line, func,
             "Socket %s zk retcode=%d, errno=%d(%s): %s",
             zoo_get_current_server(zh),rc,errno,strerror(errno),buf);
         va_end(va);
@@ -2221,7 +2283,7 @@ static int prime_connection(zhandle_t *zh)
     serialize_prime_connect(&req, buffer_req);
     rc=rc<0 ? rc : zookeeper_send(zh->fd, buffer_req, len);
     if (rc<0) {
-        return handle_socket_error_msg(zh, __LINE__, ZCONNECTIONLOSS,
+        return handle_socket_error_msg(zh, __LINE__, __func__, ZCONNECTIONLOSS,
                 "failed to send a handshake packet: %s", strerror(errno));
     }
     zh->state = ZOO_ASSOCIATING_STATE;
@@ -2510,6 +2572,7 @@ int zookeeper_interest(zhandle_t *zh, socket_t *fd, int *interest,
             if (zh->fd->sock < 0) {
               rc = handle_socket_error_msg(zh,
                                            __LINE__,
+                                           __func__,
                                            ZSYSTEMERROR,
                                            "socket() call failed");
               return api_epilog(zh, rc);
@@ -2533,6 +2596,7 @@ int zookeeper_interest(zhandle_t *zh, socket_t *fd, int *interest,
                 } else {
                     rc = handle_socket_error_msg(zh,
                                                  __LINE__,
+                                                 __func__,
                                                  ZCONNECTIONLOSS,
                                                  "connect() call failed");
                     return api_epilog(zh, rc);
@@ -2581,7 +2645,7 @@ int zookeeper_interest(zhandle_t *zh, socket_t *fd, int *interest,
             *interest=0;
             *tv = get_timeval(0);
             return api_epilog(zh,handle_socket_error_msg(zh,
-                    __LINE__,ZOPERATIONTIMEOUT,
+                    __LINE__, __func__, ZOPERATIONTIMEOUT,
                     "connection to %s timed out (exceeded timeout by %dms)",
                     format_endpoint_info(&zh->addr_cur),
                     -recv_to));
@@ -2737,7 +2801,7 @@ static int init_ssl_for_socket(zsock_t *fd, zhandle_t *zh, int fail_on_error) {
         fd->ssl_sock = SSL_new(*ctx);
         if (fd->ssl_sock == NULL) {
             if (fail_on_error) {
-                return handle_socket_error_msg(zh,__LINE__,ZSSLCONNECTIONERROR, "error creating ssl context");
+                return handle_socket_error_msg(zh, __LINE__, __func__, ZSSLCONNECTIONERROR, "error creating ssl context");
             } else {
                 LOG_ERROR(LOGCALLBACK(zh), "error creating ssl context");
                 return ZSSLCONNECTIONERROR;
@@ -2768,7 +2832,7 @@ static int init_ssl_for_socket(zsock_t *fd, zhandle_t *zh, int fail_on_error) {
                 FD_CLR(sock, &s_rfds);
             } else {
                 if (fail_on_error) {
-                    return handle_socket_error_msg(zh,__LINE__,ZSSLCONNECTIONERROR, "error in ssl connect");
+                    return handle_socket_error_msg(zh, __LINE__, __func__, ZSSLCONNECTIONERROR, "error in ssl connect");
                 } else {
                     LOG_ERROR(LOGCALLBACK(zh), "error in ssl connect");
                     return ZSSLCONNECTIONERROR;
@@ -2777,7 +2841,7 @@ static int init_ssl_for_socket(zsock_t *fd, zhandle_t *zh, int fail_on_error) {
             rc = select(sock + 1, &s_rfds, &s_wfds, NULL, &tv);
             if (rc == -1) {
                 if (fail_on_error) {
-                    return handle_socket_error_msg(zh,__LINE__,ZSSLCONNECTIONERROR, "error in ssl connect (after select)");
+                    return handle_socket_error_msg(zh, __LINE__, __func__, ZSSLCONNECTIONERROR, "error in ssl connect (after select)");
                 } else {
                     LOG_ERROR(LOGCALLBACK(zh), "error in ssl connect (after select)");
                     return ZSSLCONNECTIONERROR;
@@ -2812,6 +2876,11 @@ static void finalize_session_establishment(zhandle_t *zh) {
     LOG_DEBUG(LOGCALLBACK(zh), "Calling a watcher for a ZOO_SESSION_EVENT and the state=ZOO_CONNECTED_STATE");
     zh->input_buffer = 0; // just in case the watcher calls zookeeper_process() again
     PROCESS_SESSION_EVENT(zh, zh->state);
+
+    if (has_sasl_client(zh)) {
+        /* some packets might have been delayed during SASL negotiaton. */
+        adaptor_send_queue(zh, 0);
+    }
 }
 
 #ifdef HAVE_CYRUS_SASL_H
@@ -2891,7 +2960,7 @@ static int check_events(zhandle_t *zh, int events)
         if (rc < 0 || error) {
             if (rc == 0)
                 errno = error;
-            return handle_socket_error_msg(zh, __LINE__,ZCONNECTIONLOSS,
+            return handle_socket_error_msg(zh, __LINE__, __func__, ZCONNECTIONLOSS,
                 "server refused to accept the client");
         }
         // We do SSL_connect() here
@@ -2911,7 +2980,7 @@ static int check_events(zhandle_t *zh, int events)
         if (rc < 0 || error) {
             if (rc == 0)
                 errno = error;
-            return handle_socket_error_msg(zh, __LINE__,ZCONNECTIONLOSS,
+            return handle_socket_error_msg(zh, __LINE__, __func__, ZCONNECTIONLOSS,
                 "server refused to accept the client");
         }
 
@@ -2926,7 +2995,7 @@ static int check_events(zhandle_t *zh, int events)
         /* make the flush call non-blocking by specifying a 0 timeout */
         int rc=flush_send_queue(zh,0);
         if (rc < 0)
-            return handle_socket_error_msg(zh,__LINE__,ZCONNECTIONLOSS,
+            return handle_socket_error_msg(zh, __LINE__, __func__, ZCONNECTIONLOSS,
                 "failed while flushing send queue");
     }
     if (events&ZOOKEEPER_READ) {
@@ -2937,7 +3006,7 @@ static int check_events(zhandle_t *zh, int events)
 
         rc = recv_buffer(zh, zh->input_buffer);
         if (rc < 0) {
-            return handle_socket_error_msg(zh, __LINE__,ZCONNECTIONLOSS,
+            return handle_socket_error_msg(zh, __LINE__, __func__, ZCONNECTIONLOSS,
                 "failed while receiving a server response");
         }
         if (rc > 0) {
@@ -2973,7 +3042,7 @@ static int check_events(zhandle_t *zh, int events)
                 if (oldid != 0 && oldid != newid) {
                     zh->state = ZOO_EXPIRED_SESSION_STATE;
                     errno = ESTALE;
-                    return handle_socket_error_msg(zh,__LINE__,ZSESSIONEXPIRED,
+                    return handle_socket_error_msg(zh, __LINE__, __func__, ZSESSIONEXPIRED,
                             "sessionId=%#llx has expired.",oldid);
                 } else {
                     zh->recv_timeout = zh->primer_storage.timeOut;
@@ -3413,7 +3482,7 @@ int zookeeper_process(zhandle_t *zh, int events)
                 // signaled and deallocated) and disconnect from the server
                 queue_completion(&zh->sent_requests,cptr,1);
                 return api_epilog(zh,
-                                  handle_socket_error_msg(zh, __LINE__,ZRUNTIMEINCONSISTENCY,
+                                  handle_socket_error_msg(zh, __LINE__, __func__, ZRUNTIMEINCONSISTENCY,
                                   "unexpected server response: expected %#x, but received %#x",
                                   hdr.xid,cptr->xid));
             }
@@ -3894,6 +3963,19 @@ static int Request_path_watch_init(zhandle_t *zh, int mode,
 /*---------------------------------------------------------------------------*
  * ASYNC API
  *---------------------------------------------------------------------------*/
+
+/* make an attempt to send queued requests immediately without blocking */
+static int nonblocking_send(zhandle_t *zh, int rc)
+{
+    if (adaptor_send_queue(zh, 0) < 0) {
+        if (zh->fd->sock != -1) {
+            close_zsock(zh->fd);
+            zh->state = ZOO_NOTCONNECTED_STATE;
+        }
+    }
+    return (rc < 0) ? ZMARSHALLINGERROR : ZOK;
+}
+
 int zoo_aget(zhandle_t *zh, const char *path, int watch, data_completion_t dc,
         const void *data)
 {
@@ -3933,9 +4015,8 @@ int zoo_awget(zhandle_t *zh, const char *path,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_agetconfig(zhandle_t *zh, int watch, data_completion_t dc,
@@ -3977,9 +4058,8 @@ int zoo_awgetconfig(zhandle_t *zh, watcher_fn watcher, void* watcherCtx,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
                zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_areconfig(zhandle_t *zh, const char *joining, const char *leaving,
@@ -4013,10 +4093,8 @@ int zoo_areconfig(zhandle_t *zh, const char *joining, const char *leaving,
     close_buffer_oarchive(&oa, 0);
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending Reconfig request xid=%#x to %s",h.xid, zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
 
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+    return nonblocking_send(zh, rc);
 }
 
 static int SetDataRequest_init(zhandle_t *zh, struct SetDataRequest *req,
@@ -4059,9 +4137,8 @@ int zoo_aset(zhandle_t *zh, const char *path, const char *buffer, int buflen,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 static int CreateRequest_init(zhandle_t *zh, struct CreateRequest *req,
@@ -4186,9 +4263,8 @@ int zoo_acreate_ttl(zhandle_t *zh, const char *path, const char *value,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_acreate2(zhandle_t *zh, const char *path, const char *value,
@@ -4253,9 +4329,8 @@ int zoo_acreate2_ttl(zhandle_t *zh, const char *path, const char *value,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int DeleteRequest_init(zhandle_t *zh, struct DeleteRequest *req,
@@ -4293,9 +4368,8 @@ int zoo_adelete(zhandle_t *zh, const char *path, int version,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_aexists(zhandle_t *zh, const char *path, int watch,
@@ -4332,9 +4406,8 @@ int zoo_awexists(zhandle_t *zh, const char *path,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 static int zoo_awget_children_(zhandle_t *zh, const char *path,
@@ -4365,9 +4438,8 @@ static int zoo_awget_children_(zhandle_t *zh, const char *path,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_aget_children(zhandle_t *zh, const char *path, int watch,
@@ -4413,9 +4485,8 @@ static int zoo_awget_children2_(zhandle_t *zh, const char *path,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_aget_children2(zhandle_t *zh, const char *path, int watch,
@@ -4456,9 +4527,8 @@ int zoo_async(zhandle_t *zh, const char *path,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 
@@ -4486,9 +4556,8 @@ int zoo_aget_acl(zhandle_t *zh, const char *path, acl_completion_t completion,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 int zoo_aset_acl(zhandle_t *zh, const char *path, int version,
@@ -4517,9 +4586,8 @@ int zoo_aset_acl(zhandle_t *zh, const char *path, int version,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",h.xid,path,
             zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
-    return (rc < 0)?ZMARSHALLINGERROR:ZOK;
+
+    return nonblocking_send(zh, rc);
 }
 
 /* Completions for multi-op results */
@@ -4678,10 +4746,8 @@ int zoo_amulti(zhandle_t *zh, int count, const zoo_op_t *ops,
 
     LOG_DEBUG(LOGCALLBACK(zh), "Sending multi request xid=%#x with %d subrequests to %s",
             h.xid, index, zoo_get_current_server(zh));
-    /* make a best (non-blocking) effort to send the requests asap */
-    adaptor_send_queue(zh, 0);
 
-    return (rc < 0) ? ZMARSHALLINGERROR : ZOK;
+    return nonblocking_send(zh, rc);
 }
 
 typedef union WatchesRequest WatchesRequest;
@@ -4764,7 +4830,6 @@ static int aremove_watches(
         zh, h.xid, COMPLETION_VOID, completion, data, 0, wdo, 0);
     rc = rc < 0 ? rc : queue_buffer_bytes(&zh->to_send, get_buffer(oa),
             get_buffer_len(oa));
-    rc = rc < 0 ? ZMARSHALLINGERROR : ZOK;
     leave_critical(zh);
 
     /* We queued the buffer, so don't free it */
@@ -4773,7 +4838,7 @@ static int aremove_watches(
     LOG_DEBUG(LOGCALLBACK(zh), "Sending request xid=%#x for path [%s] to %s",
               h.xid, path, zoo_get_current_server(zh));
 
-    adaptor_send_queue(zh, 0);
+    rc = nonblocking_send(zh, rc);
 
 done:
     free_duplicate_path(server_path, path);
@@ -4855,6 +4920,20 @@ int flush_send_queue(zhandle_t*zh, int timeout)
     // successful
     lock_buffer_list(&zh->to_send);
     while (zh->to_send.head != 0 && (is_connected(zh) || is_sasl_auth_in_progress(zh))) {
+        if (is_sasl_auth_in_progress(zh)) {
+            // We don't let non-SASL packets escape as long as
+            // negotiation is not complete.  (SASL packets are always
+            // pushed to the front of the queue.)
+            buffer_list_t *buff = zh->to_send.head;
+            int32_t type;
+
+            rc = extract_request_type(buff->buffer, buff->len, &type);
+
+            if (rc < 0 || type != ZOO_SASL_OP) {
+                break;
+            }
+        }
+
         if(timeout!=0){
 #ifndef _WIN32
             struct pollfd fds;
@@ -5020,8 +5099,14 @@ int zoo_add_auth(zhandle_t *zh,const char* scheme,const char* cert,
     add_last_auth(&zh->auth_h, authinfo);
     zoo_unlock_auth(zh);
 
-    if (is_connected(zh) || zh->state == ZOO_ASSOCIATING_STATE)
+    if (is_connected(zh) ||
+        // When associating, only send info packets if no SASL
+        // negotiation is planned.  (Such packets would be queued in
+        // front of SASL packets, which is forbidden, and SASL
+        // completion is followed by a 'send_auth_info' anyway.)
+        (zh->state == ZOO_ASSOCIATING_STATE && !has_sasl_client(zh))) {
         return send_last_auth_info(zh);
+    }
 
     return ZOK;
 }

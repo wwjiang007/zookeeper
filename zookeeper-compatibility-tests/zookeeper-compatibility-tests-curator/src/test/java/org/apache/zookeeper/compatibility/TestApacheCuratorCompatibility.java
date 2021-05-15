@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -6,9 +6,9 @@
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
  * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -27,6 +27,7 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.cache.CuratorCache;
 import org.apache.curator.retry.RetryOneTime;
+import org.apache.curator.test.TestingCluster;
 import org.apache.curator.test.TestingServer;
 import org.junit.jupiter.api.Test;
 
@@ -40,26 +41,38 @@ public class TestApacheCuratorCompatibility {
     @Test
     public void testBasicUsageOfApisAndRecipes() throws Exception {
         try (TestingServer server = new TestingServer()) {
-            RetryOneTime retryPolicy = new RetryOneTime(1);
-            try (CuratorFramework client = CuratorFrameworkFactory.newClient(server.getConnectString(), retryPolicy)) {
-                try (CuratorCache cache = CuratorCache.build(client, "/base/path")) {
-                    client.start();
-                    cache.start();
+            doTest(server.getConnectString());
+        }
+    }
 
-                    BlockingQueue<String> paths = new LinkedBlockingQueue<>();
-                    cache.listenable().addListener((dummy1, dummy2, data) -> paths.add(data.getPath()));
+    @Test
+    public void testBasicUsageOfApisAndRecipesInCluster() throws Exception {
+        try (TestingCluster cluster = new TestingCluster(3)) {
+            cluster.start();
+            doTest(cluster.getConnectString());
+        }
+    }
 
-                    client.create().creatingParentsIfNeeded().forPath("/base/path/1");
-                    client.create().creatingParentsIfNeeded().forPath("/base/path/2");
-                    client.create().creatingParentsIfNeeded().forPath("/base/path/1/a");
-                    client.create().creatingParentsIfNeeded().forPath("/base/path/2/a");
+    private void doTest(String connectionString) throws Exception {
+        RetryOneTime retryPolicy = new RetryOneTime(1);
+        try (CuratorFramework client = CuratorFrameworkFactory.newClient(connectionString, retryPolicy)) {
+            try (CuratorCache cache = CuratorCache.build(client, "/base/path")) {
+                client.start();
+                cache.start();
 
-                    assertEquals("/base/path", poll(paths));
-                    assertEquals("/base/path/1", poll(paths));
-                    assertEquals("/base/path/2", poll(paths));
-                    assertEquals("/base/path/1/a", poll(paths));
-                    assertEquals("/base/path/2/a", poll(paths));
-                }
+                BlockingQueue<String> paths = new LinkedBlockingQueue<>();
+                cache.listenable().addListener((dummy1, dummy2, data) -> paths.add(data.getPath()));
+
+                client.create().creatingParentsIfNeeded().forPath("/base/path/1");
+                client.create().creatingParentsIfNeeded().forPath("/base/path/2");
+                client.create().creatingParentsIfNeeded().forPath("/base/path/1/a");
+                client.create().creatingParentsIfNeeded().forPath("/base/path/2/a");
+
+                assertEquals("/base/path", poll(paths));
+                assertEquals("/base/path/1", poll(paths));
+                assertEquals("/base/path/2", poll(paths));
+                assertEquals("/base/path/1/a", poll(paths));
+                assertEquals("/base/path/2/a", poll(paths));
             }
         }
     }

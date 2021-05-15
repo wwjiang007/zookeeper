@@ -321,14 +321,27 @@ machine in your deployment.
 
 For the ZooKeeper service to be active, there must be a
 majority of non-failing machines that can communicate with
-each other. To create a deployment that can tolerate the
-failure of F machines, you should count on deploying 2xF+1
-machines.  Thus, a deployment that consists of three machines
-can handle one failure, and a deployment of five machines can
-handle two failures. Note that a deployment of six machines
-can only handle two failures since three machines is not a
-majority.  For this reason, ZooKeeper deployments are usually
-made up of an odd number of machines.
+each other. For a ZooKeeper ensemble with N servers,
+if N is odd, the ensemble is able to tolerate up to N/2
+server failures without losing any znode data;
+if N is even, the ensemble is able to tolerate up to N/2-1
+server failures.
+
+For example, if we have a ZooKeeper ensemble with 3 servers,
+the ensemble is able to tolerate up to 1 (3/2) server failures.
+If we have a ZooKeeper ensemble with 5 servers,
+the ensemble is able to tolerate up to 2 (5/2) server failures.
+If the ZooKeeper ensemble with 6 servers, the ensemble
+is also able to tolerate up to 2 (6/2-1) server failures
+without losing data and prevent the "brain split" issue.
+
+ZooKeeper ensemble is usually has odd number of servers.
+This is because with the even number of servers,
+the capacity of failure tolerance is the same as
+the ensemble with one less server
+(2 failures for both 5-node ensemble and 6-node ensemble),
+but the ensemble has to maintain extra connections and
+data transfers for one more server.
 
 To achieve the highest probability of tolerating a failure
 you should try to make machine failures independent. For
@@ -788,7 +801,7 @@ property, when available, is noted below.
    must be 127 or less. Additionally, the maximum support TTL value is `1099511627775` which is smaller
    than what was allowed in 3.5.3 (`1152921504606846975`)
 
-* *watchManaggerName* :
+* *watchManagerName* :
   (Java system property only: **zookeeper.watchManagerName**)
   **New in 3.6.0:** Added in [ZOOKEEPER-1179](https://issues.apache.org/jira/browse/ZOOKEEPER-1179)
    New watcher manager WatchManagerOptimized is added to optimize the memory overhead in heavy watch use cases. This
@@ -978,6 +991,12 @@ property, when available, is noted below.
     Does not affect the limit defined by *flushDelay*.
     Default is 1000.
 
+* *enforceQuota* :
+    (Java system property: **zookeeper.enforceQuota**)
+    **New in 3.7.0:**
+    Enforce the quota check. When enabled and the client exceeds the total bytes or children count hard quota under a znode, the server will reject the request and reply the client a `QuotaExceededException` by force.
+    The default value is: false. Exploring [quota feature](http://zookeeper.apache.org/doc/current/zookeeperQuotas.html) for more details.
+
 * *requestThrottleLimit* :
     (Java system property: **zookeeper.request_throttle_max_requests**)
     **New in 3.6.0:**
@@ -1089,7 +1108,17 @@ property, when available, is noted below.
     due to the potential inconsistency in the /zookeeper/quota stat node,
     we can include that after that issue is fixed.
 
-    By default, this feautre is disabled, set "true" to enable it.
+    By default, this feature is enabled, set "false" to disable it.
+
+* *snapshot.compression.method* :
+    (Java system property: **zookeeper.snapshot.compression.method**)
+    **New in 3.6.0:**
+    This property controls whether or not ZooKeeper should compress snapshots
+    before storing them on disk (see [ZOOKEEPER-3179](https://issues.apache.org/jira/browse/ZOOKEEPER-3179)).
+    Possible values are:
+    - "": Disabled (no snapshot compression). This is the default behavior.
+    - "gz": See [gzip compression](https://en.wikipedia.org/wiki/Gzip).
+    - "snappy": See [Snappy compression](https://en.wikipedia.org/wiki/Snappy_(compression)).
 
 * *snapshot.trust.empty* :
     (Java system property: **zookeeper.snapshot.trust.empty**)
@@ -1104,6 +1133,7 @@ property, when available, is noted below.
     and restart ZooKeeper process so ZooKeeper can continue normal data
     consistency check during recovery process.
     Default value is false.
+
 * *audit.enable* :
     (Java system property: **zookeeper.audit.enable**)
     **New in 3.6.0:**
@@ -1145,8 +1175,25 @@ property, when available, is noted below.
     When set to 0, no requests will be throttled. The default is 0.
 
 * *learner.closeSocketAsync*
-    (Jave system property only: **learner.closeSocketAsync**)
-    When enabled, a learner will close the quorum socket asynchronously. This is useful for TLS connections where closing a socket might take a long time, block the shutdown process, potentially delay a new leader election, and leave the quorum unavailabe. Closing the socket asynchronously avoids blocking the shutdown process despite the long socket closing time and a new leader election can be started while the socket being closed. The default is false.
+  (Java system property: **zookeeper.learner.closeSocketAsync**)
+  (Java system property: **learner.closeSocketAsync**)(Added for backward compatibility)
+    **New in 3.7.0:**
+    When enabled, a learner will close the quorum socket asynchronously. This is useful for TLS connections where closing a socket might take a long time, block the shutdown process, potentially delay a new leader election, and leave the quorum unavailabe. Closing the socket asynchronously avoids blocking the shutdown process despite the long socket closing time and a new leader election can be started while the socket being closed. 
+    The default is false.
+
+* *leader.closeSocketAsync*
+  (Java system property: **zookeeper.leader.closeSocketAsync**)
+  (Java system property: **leader.closeSocketAsync**)(Added for backward compatibility)
+   **New in 3.7.0:**
+   When enabled, the leader will close a quorum socket asynchoronously. This is useful for TLS connections where closing a socket might take a long time. If disconnecting a follower is initiated in ping() because of a failed SyncLimitCheck then the long socket closing time will block the sending of pings to other followers. Without receiving pings, the other followers will not send session information to the leader, which causes sessions to expire. Setting this flag to true ensures that pings will be sent regularly.
+   The default is false.
+
+* *learner.asyncSending*
+  (Java system property: **zookeeper.learner.asyncSending**)
+  (Java system property: **learner.asyncSending**)(Added for backward compatibility)
+  **New in 3.7.0:**
+  The sending and receiving packets in Learner were done synchronously in a critical section. An untimely network issue could cause the followers to hang (see [ZOOKEEPER-3575](https://issues.apache.org/jira/browse/ZOOKEEPER-3575) and [ZOOKEEPER-4074](https://issues.apache.org/jira/browse/ZOOKEEPER-4074)). The new design moves sending packets in Learner to a separate thread and sends the packets asynchronously. The new design is enabled with this parameter (learner.asyncSending).
+  The default is false.
 
 * *forward_learner_requests_to_commit_processor_disabled*
     (Jave system property: **zookeeper.forward_learner_requests_to_commit_processor_disabled**)
@@ -1343,7 +1390,8 @@ of servers -- that is, when deploying clusters of servers.
     not enable the command.
     By default the whitelist only contains "srvr" command
     which zkServer.sh uses. The rest of four letter word commands are disabled
-    by default.
+    by default: attempting to use them will gain a response
+    ".... is not executed because it is not in the whitelist."
     Here's an example of the configuration that enables stat, ruok, conf, and isro
     command while disabling the rest of Four Letter Words command:
 
@@ -1434,6 +1482,16 @@ Beside this page, you can also find useful information about client side configu
 The ZooKeeper Wiki also has useful pages about [ZooKeeper SSL support](https://cwiki.apache.org/confluence/display/ZOOKEEPER/ZooKeeper+SSL+User+Guide),
 and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/display/ZOOKEEPER/ZooKeeper+and+SASL).
 
+* *DigestAuthenticationProvider.enabled* :
+    (Java system property: **zookeeper.DigestAuthenticationProvider.enabled**)
+    **New in 3.7:**
+    Determines whether the `digest` authentication provider is
+    enabled.  The default value is **true** for backwards
+    compatibility, but it may be a good idea to disable this provider
+    if not used, as it can result in misleading entries appearing in
+    audit logs
+    (see [ZOOKEEPER-3979](https://issues.apache.org/jira/browse/ZOOKEEPER-3979))
+
 * *DigestAuthenticationProvider.superDigest* :
     (Java system property: **zookeeper.DigestAuthenticationProvider.superDigest**)
     By default this feature is **disabled**
@@ -1455,6 +1513,33 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     localhost (not over the network) or over an encrypted
     connection.
 
+* *DigestAuthenticationProvider.digestAlg* :
+    (Java system property: **zookeeper.DigestAuthenticationProvider.digestAlg**)
+     **New in 3.7.0:**
+    Set ACL digest algorithm. The default value is: `SHA1` which will be deprecated in the future for security issues.
+    Set this property the same value in all the servers.
+
+    - How to support other more algorithms?
+        - modify the `java.security` configuration file under `$JAVA_HOME/jre/lib/security/java.security` by specifying:
+             `security.provider.<n>=<provider class name>`.
+
+             ```
+             For example:
+             set zookeeper.DigestAuthenticationProvider.digestAlg=RipeMD160
+             security.provider.3=org.bouncycastle.jce.provider.BouncyCastleProvider
+             ```
+
+        - copy the jar file to `$JAVA_HOME/jre/lib/ext/`.
+
+             ```
+             For example:
+             copy bcprov-jdk15on-1.60.jar to $JAVA_HOME/jre/lib/ext/
+             ```
+
+    - How to migrate from one digest algorithm to another?
+        - 1. Regenerate `superDigest` when migrating to new algorithm.
+        - 2. `SetAcl` for a znode which already had a digest auth of old algorithm.
+
 * *X509AuthenticationProvider.superUser* :
     (Java system property: **zookeeper.X509AuthenticationProvider.superUser**)
     The SSL-backed way to enable a ZooKeeper ensemble
@@ -1468,6 +1553,9 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     Similar to **zookeeper.X509AuthenticationProvider.superUser**
     but is generic for SASL based logins. It stores the name of
     a user that can access the znode hierarchy as a "super" user.
+    You can specify multiple SASL super users using the
+    **zookeeper.superUser.[suffix]** notation, e.g.:
+    `zookeeper.superUser.1=...`.
 
 * *ssl.authProvider* :
     (Java system property: **zookeeper.ssl.authProvider**)
@@ -1492,8 +1580,8 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     If the credential is not in the list, the connection request will be refused.
     This prevents a client accidentally connecting to a wrong ensemble.
 
-* *zookeeper.sessionRequireClientSASLAuth* :
-    (Java system property only: **zookeeper.sessionRequireClientSASLAuth**)
+* *sessionRequireClientSASLAuth* :
+    (Java system property: **zookeeper.sessionRequireClientSASLAuth**)
     **New in 3.6.0:**
     When set to **true**, ZooKeeper server will only accept connections and requests from clients
     that have authenticated with server via SASL. Clients that are not configured with SASL
@@ -1502,17 +1590,46 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     in such case, both Java and C client will close the session with server thereafter,
     without further attempts on retrying to reconnect.
 
+    This configuration is short hand for **enforce.auth.enabled=true** and **enforce.auth.scheme=sasl**
+
     By default, this feature is disabled. Users who would like to opt-in can enable the feature
-    by setting **zookeeper.sessionRequireClientSASLAuth** to **true**.
+    by setting **sessionRequireClientSASLAuth** to **true**.
 
     This feature overrules the <emphasis role="bold">zookeeper.allowSaslFailedClients</emphasis> option, so even if server is
     configured to allow clients that fail SASL authentication to login, client will not be able to
     establish a session with server if this feature is enabled.
 
+* *enforce.auth.enabled* :
+    (Java system property : **zookeeper.enforce.auth.enabled**)
+    **New in 3.7.0:**
+    When set to **true**, ZooKeeper server will only accept connections and requests from clients
+    that have authenticated with server via configured auth scheme. Authentication schemes
+    can be configured using property enforce.auth.schemes. Clients that are not
+    configured with the any of the auth scheme configured at server or configured but failed authentication (i.e. with invalid credential)
+    will not be able to establish a session with server. A typed error code (-124) will be delivered
+    in such case, both Java and C client will close the session with server thereafter,
+    without further attempts on retrying to reconnect.
+
+    By default, this feature is disabled. Users who would like to opt-in can enable the feature
+    by setting **enforce.auth.enabled** to **true**.
+
+    When **enforce.auth.enabled=true** and **enforce.auth.schemes=sasl** then 
+    <emphasis role="bold">zookeeper.allowSaslFailedClients</emphasis> configuration is overruled. So even if server is
+    configured to allow clients that fail SASL authentication to login, client will not be able to
+    establish a session with server if this feature is enabled with sasl as authentication scheme.
+
+* *enforce.auth.schemes* :
+    (Java system property : **zookeeper.enforce.auth.schemes**)
+    **New in 3.7.0:**
+    Comma separated list of authentication schemes. Clients must be authenticated with at least one
+    authentication scheme before doing any zookeeper operations. 
+    This property is used only when **enforce.auth.enabled** is to **true**.
+
 * *sslQuorum* :
     (Java system property: **zookeeper.sslQuorum**)
     **New in 3.5.5:**
-    Enables encrypted quorum communication. Default is `false`.
+    Enables encrypted quorum communication. Default is `false`. When enabling this feature, please also consider enabling *leader.closeSocketAsync*
+    and *learner.closeSocketAsync* to avoid issues associated with the potentially long socket closing time when shutting down an SSL connection.
 
 * *ssl.keyStore.location and ssl.keyStore.password* and *ssl.quorum.keyStore.location* and *ssl.quorum.keyStore.password* :
     (Java system properties: **zookeeper.ssl.keyStore.location** and **zookeeper.ssl.keyStore.password** and **zookeeper.ssl.quorum.keyStore.location** and **zookeeper.ssl.quorum.keyStore.password**)
@@ -1525,7 +1642,9 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     (Java system properties: **zookeeper.ssl.keyStore.type** and **zookeeper.ssl.quorum.keyStore.type**)
     **New in 3.5.5:**
     Specifies the file format of client and quorum keystores. Values: JKS, PEM, PKCS12 or null (detect by filename).
-    Default: null
+    Default: null.
+    **New in 3.6.3, 3.7.0:**
+    The format BCFKS was added.
 
 * *ssl.trustStore.location* and *ssl.trustStore.password* and *ssl.quorum.trustStore.location* and *ssl.quorum.trustStore.password* :
     (Java system properties: **zookeeper.ssl.trustStore.location** and **zookeeper.ssl.trustStore.password** and **zookeeper.ssl.quorum.trustStore.location** and **zookeeper.ssl.quorum.trustStore.password**)
@@ -1538,7 +1657,9 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     (Java system properties: **zookeeper.ssl.trustStore.type** and **zookeeper.ssl.quorum.trustStore.type**)
     **New in 3.5.5:**
     Specifies the file format of client and quorum trustStores. Values: JKS, PEM, PKCS12 or null (detect by filename).
-    Default: null
+    Default: null.
+    **New in 3.6.3, 3.7.0:**
+    The format BCFKS was added.
 
 * *ssl.protocol* and *ssl.quorum.protocol* :
     (Java system properties: **zookeeper.ssl.protocol** and **zookeeper.ssl.quorum.protocol**)
@@ -1625,6 +1746,14 @@ and [SASL authentication for ZooKeeper](https://cwiki.apache.org/confluence/disp
     You can instruct ZooKeeper to remove the realm from the client principal name during authentication.
     (e.g. the zk/myhost@EXAMPLE.COM client principal will be authenticated in ZooKeeper as zk/myhost)
     Default: false
+
+* *kerberos.canonicalizeHostNames*
+    (Java system property: **zookeeper.kerberos.canonicalizeHostNames**)
+    **New in 3.7.0:**
+    Instructs ZooKeeper to canonicalize server host names extracted from *server.x* lines.
+    This allows using e.g. `CNAME` records to reference servers in configuration files, while still enabling SASL Kerberos authentication between quorum members.
+    It is essentially the quorum equivalent of the *zookeeper.sasl.client.canonicalize.hostname* property for clients.
+    The default value is **false** for backwards compatibility.
 
 * *multiAddress.enabled* :
     (Java system property: **zookeeper.multiAddress.enabled**)
@@ -1931,6 +2060,15 @@ Both subsystems need to have sufficient amount of threads to achieve peak read t
 
 #### AdminServer configuration
 
+**New in 3.7.1:** The following
+options are used to configure the [AdminServer](#sc_adminserver).
+
+* *admin.forceHttps* :
+  (Java system property: **zookeeper.admin.forceHttps**)
+  Force AdminServer to use SSL, thus allowing only HTTPS traffic.
+  Defaults to disabled.
+  Overwrites **admin.portUnification** settings.
+
 **New in 3.6.0:** The following
 options are used to configure the [AdminServer](#sc_adminserver).
 
@@ -2149,7 +2287,7 @@ connections respectively.
 
 **New in 3.5.3:**
 Four Letter Words need to be explicitly white listed before using.
-Please refer **4lw.commands.whitelist**
+Please refer to **4lw.commands.whitelist**
 described in [cluster configuration section](#sc_clusterOptions) for details.
 Moving forward, Four Letter Words will be deprecated, please use
 [AdminServer](#sc_adminserver) instead.
@@ -2176,9 +2314,11 @@ Moving forward, Four Letter Words will be deprecated, please use
     Print details about serving environment
 
 * *ruok* :
-    Tests if server is running in a non-error state. The server
-    will respond with imok if it is running. Otherwise it will not
-    respond at all.
+    Tests if the server is running in a non-error state.
+    When the whitelist enables ruok, the server will respond with `imok`
+    if it is running, otherwise it will not respond at all.
+    When ruok is disabled, the server responds with:
+    "ruok is not executed because it is not in the whitelist."
     A response of "imok" does not necessarily indicate that the
     server has joined the quorum, just that the server process is active
     and bound to the specified client port. Use "stat" for details on
